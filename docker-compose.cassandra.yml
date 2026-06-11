@@ -1,0 +1,79 @@
+# Cluster Cassandra de 3 nodos en UNA sola PC (maquina A).
+# Los 3 contenedores se unen en un solo cluster por gossip a traves de una red
+# bridge interna de Docker. El replication_factor del keyspace
+# (infra/init-cassandra.cql) decide en cuantos nodos se replica cada fila.
+#
+# Levantar (arranca en orden, cada nodo espera a que el anterior este "UN"):
+#   docker compose -f docker-compose.cassandra.yml up -d
+#
+# Solo el nodo 1 expone el puerto 9042 al host: report-service se conecta a
+# localhost:9042 y el driver descubre los otros 2 nodos por gossip.
+#
+# Ver el cluster formado (3 lineas "UN"):
+#   docker exec -it toby-cassandra1 nodetool status
+#
+# Crear el esquema UNA vez, cuando los 3 esten UN:
+#   docker exec -i toby-cassandra1 cqlsh -f /init-cassandra.cql
+#
+# Demostrar la replicacion (en que nodos vive una fila -> 3 IPs con RF=3):
+#   docker exec -it toby-cassandra1 nodetool getendpoints reportks ventas <pedidoId>
+# Tolerancia a fallos: apaga un nodo y los reportes siguen respondiendo.
+#   docker compose -f docker-compose.cassandra.yml stop cassandra3
+
+x-cassandra-base: &cassandra-base
+  image: cassandra:5
+  networks: [cassandra-net]
+  environment: &cassandra-env
+    CASSANDRA_CLUSTER_NAME: "toby-cluster"
+    # Seed = nodo 1: punto de encuentro del cluster. Todos apuntan aqui.
+    CASSANDRA_SEEDS: "cassandra1"
+    CASSANDRA_DC: "datacenter1"
+    CASSANDRA_ENDPOINT_SNITCH: "GossipingPropertyFileSnitch"
+    # Heap moderado para no ahogar la PC con 3 nodos a la vez.
+    MAX_HEAP_SIZE: "512M"
+    HEAP_NEWSIZE: "128M"
+  healthcheck:
+    test: ["CMD-SHELL", "nodetool status | grep -q '^UN'"]
+    interval: 15s
+    timeout: 10s
+    retries: 30
+    start_period: 60s
+
+services:
+  cassandra1:
+    <<: *cassandra-base
+    container_name: toby-cassandra1
+    ports:
+      # Unico nodo expuesto al host: report-service usa localhost:9042.
+      - "9042:9042"
+    volumes:
+      - cassandra1-data:/var/lib/cassandra
+      - ./infra/init-cassandra.cql:/init-cassandra.cql:ro
+
+  cassandra2:
+    <<: *cassandra-base
+    container_name: toby-cassandra2
+    volumes:
+      - cassandra2-data:/var/lib/cassandra
+    # Espera a que el seed este "UN" antes de unirse (evita choque de bootstrap).
+    depends_on:
+      cassandra1:
+        condition: service_healthy
+
+  cassandra3:
+    <<: *cassandra-base
+    container_name: toby-cassandra3
+    volumes:
+      - cassandra3-data:/var/lib/cassandra
+    depends_on:
+      cassandra2:
+        condition: service_healthy
+
+networks:
+  cassandra-net:
+    driver: bridge
+
+volumes:
+  cassandra1-data:
+  cassandra2-data:
+  cassandra3-data:

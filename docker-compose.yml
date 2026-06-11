@@ -1,0 +1,31 @@
+# Infraestructura de soporte para los microservicios.
+# Levantar con: docker compose up -d
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: toby-postgres
+    environment:
+      POSTGRES_USER: toby
+      POSTGRES_PASSWORD: toby
+      POSTGRES_DB: menudb
+    ports:
+      # host usa 5432 (postgres local) -> exponemos en 5433
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Script que crea orderdb al iniciar el contenedor por 1a vez (menudb = POSTGRES_DB)
+      - ./infra/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: toby-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: toby
+      RABBITMQ_DEFAULT_PASS: toby
+    ports:
+      - "5672:5672"     # protocolo AMQP
+      - "15672:15672"   # consola web: http://localhost:15672
+
+volumes:
+  postgres-data:

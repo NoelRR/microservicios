@@ -1,0 +1,31 @@
+server:
+  port: 8087
+
+spring:
+  application:
+    name: report-service
+  cassandra:
+    # Punto(s) de contacto del cluster. En multi-maquina apunta al nodo seed (maquina A).
+    # El driver descubre el resto de nodos por gossip automaticamente.
+    contact-points: ${CASSANDRA_HOST:127.0.0.1}
+    port: 9042
+    local-datacenter: ${CASSANDRA_DC:datacenter1}
+    keyspace-name: reportks
+    # El esquema (keyspace con replication_factor + tablas + UDT) se crea con
+    # infra/init-cassandra.cql ANTES de arrancar. Por eso no lo gestiona Spring.
+    schema-action: none
+    request:
+      timeout: 10s
+    connection:
+      connect-timeout: 10s
+      init-query-timeout: 10s
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: 5672
+    username: toby
+    password: toby
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
