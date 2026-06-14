@@ -22,7 +22,7 @@ Mensajería: **RabbitMQ** (no Kafka — volumen bajo, caso = colas de tareas con
 
 ## Arquitectura (3 microservicios + infra) — SIMPLIFICADA 2026-06-09
 
-> Proyecto recortado a 3 servicios + replicacion Cassandra de 3 nodos en 1 PC.
+> Proyecto recortado a 3 servicios + replicacion Cassandra de 3 nodos en 3 PCs distintas (1 por PC).
 > Eliminados: user-service, kitchen-service, inventory-service, billing-service.
 
 ```
@@ -76,11 +76,11 @@ Módulos en `pom.xml` (parent reactor): eureka-server, api-gateway, menu-service
 - Secret JWT vía env `JWT_SECRET` (default en yml; cambiar en prod).
 
 ### menu-service (:8082, PostgreSQL menudb) — compila, falta runtime
-- Modelo: `Plato` (con flags `activo`=admin publica/oculta, `disponible`=hay stock) y `Combo`
-  (ManyToMany con Plato).
-- CRUD platos + combos. `GET /menu/items` = solo `activo && disponible` (menú público).
+- Modelo: `Plato` (con flags `activo`=admin publica/oculta, `disponible`=hay stock).
+  **Combos eliminados** (Combo/ComboRepository/ComboRequest borrados, endpoints quitados).
+- CRUD platos. `GET /menu/items` = solo `activo && disponible` (menú público).
 - Endpoints: GET `/menu/items`, GET `/menu/items/all`, GET `/menu/items/{id}`,
-  POST/PUT/DELETE `/menu/items`, PATCH `/menu/items/{id}/toggle`, GET/POST `/menu/combos`.
+  POST/PUT/DELETE `/menu/items`, PATCH `/menu/items/{id}/toggle`.
 - RabbitMQ: consume exchange `inventory.exchange` (topic), routing `stock.low`,
   cola `menu.stock-low`, payload `StockEvent{platoId, disponible}` → `MenuService.marcarDisponibilidad`.
   **PENDIENTE decidir** quién mapea ingrediente→platos (inventory manda platoIds afectados,
@@ -182,18 +182,19 @@ Módulos en `pom.xml` (parent reactor): eureka-server, api-gateway, menu-service
 - ⚠️ application.yml de menu apunta a `localhost:5433` por el conflicto de puerto.
 - (mongo eliminado: solo lo usaba kitchen-service.)
 
-### Cassandra (docker-compose.cassandra.yml) — cluster de 3 nodos en 1 PC
+### Cassandra (docker-compose.cassandra.yml) — cluster distribuido (1 nodo por PC)
 
-- cassandra:5, 3 contenedores (`toby-cassandra1/2/3`) en una red bridge interna,
-  se unen por gossip (7000). Seed = `cassandra1`. Solo nodo1 expone `:9042` al host.
-- Arranque secuencial con `healthcheck` + `depends_on: service_healthy` (cada nodo espera
-  al anterior `UN` antes de unirse, evita choque de bootstrap).
-- Levantar: `docker compose -f docker-compose.cassandra.yml up -d` (sin vars HOST_IP/SEEDS).
-- Esquema UNA vez (3 nodos UN): `docker exec -i toby-cassandra1 cqlsh -f /init-cassandra.cql`
-- Keyspace `reportks` con `replication_factor: 3` → cada fila replicada en los 3 nodos.
-- Demostrar replicación: `nodetool getendpoints reportks ventas <pedidoId>` → lista 3 IPs.
-- ⚠️ Si un nodo falla con `Bootstrap Token collision` (colisión aleatoria): recrearlo limpio
-  (`docker rm -f toby-cassandraN` + `docker volume rm hamburguesas-toby_cassandraN-data` + `up -d cassandraN`).
+- cassandra:5, 1 contenedor por máquina (`toby-cassandra`) con `network_mode: host`.
+  Sin host-network el gossip no cruza entre PCs distintas (NAT de Docker bloquea).
+- Variables requeridas: `HOST_IP` (IP real de esta PC), `SEED_IP` (IP de PC-A siempre).
+- Levantar: `HOST_IP=<ip-local> SEED_IP=<ip-A> docker compose -f docker-compose.cassandra.yml up -d`
+- Esquema UNA vez desde PC-A (3 nodos UN): `docker exec -i toby-cassandra cqlsh -f /init-cassandra.cql`
+- Keyspace `reportks` con `replication_factor: 3` → cada fila replicada en las 3 PCs.
+- Demostrar replicación: `nodetool getendpoints reportks ventas <pedidoId>` → lista 3 IPs distintas.
+- Demostrar cross-PC: insertar venta en PC-A → `cqlsh` en PC-B muestra la misma fila.
+- ⚠️ Firewall: abrir puerto 7000 (gossip) y 9042 (CQL) entre las PCs.
+- ⚠️ Si un nodo falla con `Bootstrap Token collision`: `docker rm -f toby-cassandra` +
+  `docker volume rm hamburguesas-toby_cassandra-data` + volver a levantar con las vars.
 
 ## Cómo levantar (verificado funcionando)
 
@@ -246,8 +247,9 @@ Las 8 fases del plan están completas. Posibles mejoras (ninguna obligatoria):
 
 ## Convenciones del código
 
-- Paquete base `com.toby.<servicio>`. Capas: model / repository / dto / service / controller /
-  messaging / config / exception / security.
+- **Estructura plana**: 1 paquete corto por servicio (`menu`, `order`, `report`, `gateway`,
+  `eureka`), todos los `.java` en una sola carpeta `src/main/java/<pkg>/` (sin subcarpetas de
+  capas ni prefijo `com.toby`). Simplificado para proyecto académico.
 - DTOs como `record` con validación jakarta. Excepciones con `@ResponseStatus`.
 - Comentarios en español, concisos, explican el "por qué".
 - Cada servicio = su propia BD (database-per-service).

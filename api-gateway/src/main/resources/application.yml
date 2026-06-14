@@ -12,7 +12,7 @@ spring:
           enabled: true
           lower-case-service-id: true
       routes:
-        # menu-service: platos y combos
+        # menu-service: platos
         - id: menu-service
           uri: lb://menu-service
           predicates:

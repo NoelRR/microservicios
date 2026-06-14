@@ -1,7 +1,7 @@
 # Levantar Hamburguesas Toby (versión simplificada)
 
 > Proyecto recortado a **3 microservicios** (menu, order, report) + Eureka + Gateway + Frontend,
-> con **replicación Cassandra de 3 nodos en una sola PC**.
+> con **replicación Cassandra de 3 nodos distribuidos en 3 PCs distintas (RF=3)**.
 
 ## Requisitos previos
 - Docker + Docker Compose
@@ -41,53 +41,79 @@ docker compose ps   # verificar UP
 
 ---
 
-## Paso 2.5 — Cassandra: cluster de 3 nodos en 1 PC (DB de report-service)
+## Paso 2.5 — Cassandra: cluster distribuido (1 nodo por PC)
 
-report-service usa Cassandra con **replicación de 3 nodos**, todos en esta misma PC.
-Los 3 contenedores se unen en un solo cluster por gossip a través de una red bridge interna.
-Solo el nodo 1 expone `:9042` al host; el driver descubre los otros 2 por gossip.
+report-service usa Cassandra con **replicación RF=3** entre 3 máquinas distintas (PC-A, PC-B, PC-C).
+Cada PC corre 1 nodo con `network_mode: host` — el nodo usa la IP real del host para que el
+gossip cruce la LAN. Datos insertados desde cualquier PC se replican automáticamente a las otras dos.
 
-### Levantar el cluster
+### Prerequisito — abrir puertos en el firewall de cada PC
 
 ```bash
-docker compose -f docker-compose.cassandra.yml up -d
+# Gossip inter-nodo (Cassandra se comunica entre nodos por este puerto)
+sudo ufw allow 7000/tcp
+# CQL (clientes y cqlsh)
+sudo ufw allow 9042/tcp
 ```
 
-> Arranca en orden: cada nodo espera (`healthcheck`) a que el anterior esté `UN` antes
-> de unirse. Tarda ~2-3 min en total.
+### Levantar el nodo en cada PC
+
+Reemplazar `192.168.X.A`, `192.168.X.B`, `192.168.X.C` con las IPs reales de la LAN.
+
+```bash
+# PC-A (seed del cluster — levantar primero)
+HOST_IP=192.168.X.A SEED_IP=192.168.X.A docker compose -f docker-compose.cassandra.yml up -d
+
+# PC-B (esperar ~60s a que PC-A esté UN, luego)
+HOST_IP=192.168.X.B SEED_IP=192.168.X.A docker compose -f docker-compose.cassandra.yml up -d
+
+# PC-C (esperar ~60s a que PC-B esté UN, luego)
+HOST_IP=192.168.X.C SEED_IP=192.168.X.A docker compose -f docker-compose.cassandra.yml up -d
+```
 
 ### Esperar a que los 3 nodos estén UN
 
 ```bash
-docker exec -it toby-cassandra1 nodetool status
-# Deben aparecer 3 líneas "UN" (Up/Normal).
+# Ejecutar desde cualquier PC — deben aparecer 3 líneas "UN" con 3 IPs distintas
+docker exec -it toby-cassandra nodetool status
 ```
 
-### Crear el esquema — UNA sola vez (cuando los 3 estén UN)
+Ejemplo de salida esperada:
+```
+Datacenter: datacenter1
+=======================
+Status=Up/Normal  ...
+--  Address        Load    ...  State
+UN  192.168.X.A   ...          Normal
+UN  192.168.X.B   ...          Normal
+UN  192.168.X.C   ...          Normal
+```
+
+### Crear el esquema — UNA sola vez desde PC-A (cuando los 3 estén UN)
 
 ```bash
-docker exec -i toby-cassandra1 cqlsh -f /init-cassandra.cql
+docker exec -i toby-cassandra cqlsh -f /init-cassandra.cql
 ```
-
-Crea el keyspace `reportks` con `replication_factor: 3`, el UDT `item_venta` y las
-tablas `ventas` y `alertas_stock`.
 
 ### Demostrar la replicación
 
 ```bash
-# ¿En qué nodos vive una venta? Con RF=3 debe listar las 3 IPs.
-docker exec -it toby-cassandra1 nodetool getendpoints reportks ventas <pedidoId>
+# ¿En qué nodos vive una venta? Con RF=3 debe listar las 3 IPs distintas.
+docker exec -it toby-cassandra nodetool getendpoints reportks ventas <pedidoId>
 
-# Tolerancia a fallos: apaga un nodo y los reportes siguen respondiendo.
-docker compose -f docker-compose.cassandra.yml stop cassandra3
+# Insertar desde PC-A y verificar en PC-B (leer directo desde su nodo):
+#   En PC-B:
+docker exec -it toby-cassandra cqlsh -e "SELECT * FROM reportks.ventas;"
+
+# Tolerancia a fallos: apagar un nodo y los reportes siguen respondiendo.
+docker compose -f docker-compose.cassandra.yml stop   # en PC-C, por ejemplo
 ```
 
-> Si un nodo falla al unirse con `Bootstrap Token collision` (colisión aleatoria de tokens),
-> recréalo limpio:
+> **Si un nodo falla al unirse** (`Bootstrap Token collision`): borrarlo limpio y recrear.
 > ```bash
-> docker rm -f toby-cassandra3
-> docker volume rm hamburguesas-toby_cassandra3-data
-> docker compose -f docker-compose.cassandra.yml up -d cassandra3
+> docker rm -f toby-cassandra
+> docker volume rm hamburguesas-toby_cassandra-data
+> HOST_IP=192.168.X.? SEED_IP=192.168.X.A docker compose -f docker-compose.cassandra.yml up -d
 > ```
 
 ---
@@ -164,7 +190,7 @@ Llama al gateway vía proxy `/api` (`vite.config.js`), sin CORS.
 | Frontend (Vite)| 5173   | http://localhost:5173      |
 | Eureka Server  | 8761   | http://localhost:8761      |
 | PostgreSQL     | 5433   | localhost:5433             |
-| Cassandra (n1) | 9042   | localhost:9042             |
+| Cassandra      | 9042   | localhost:9042 (nodo local)|
 | RabbitMQ AMQP  | 5672   | localhost:5672             |
 | RabbitMQ UI    | 15672  | http://localhost:15672     |
 
